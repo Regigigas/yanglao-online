@@ -1,0 +1,180 @@
+name: yanglao-nest-cloud
+
+x-service: &service
+  image: yanglao-nest-backend:1.0.0
+  restart: unless-stopped
+  env_file:
+    - path: ../.env
+      required: false
+  environment: &service-env
+    DB_HOST: mysql
+    DB_PORT: 3306
+    DB_NAME: ry-cloud
+    DB_USER: root
+    DB_PASSWORD: ${DB_PASSWORD:-password}
+    JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in after/.env}
+    REDIS_HOST: redis
+    REDIS_PORT: 6379
+    REDIS_REQUIRED: "true"
+
+services:
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ry-cloud
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-password}
+      TZ: Asia/Shanghai
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci", "--default-time-zone=+08:00"]
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ../sql/ry_20260417.sql:/docker-entrypoint-initdb.d/01-base.sql:ro
+      - ../sql/purchase_tables.sql:/docker-entrypoint-initdb.d/02-purchase.sql:ro
+      - ../sql/chat_tables.sql:/docker-entrypoint-initdb.d/03-chat.sql:ro
+      - ../sql/yanglao_sync.sql:/docker-entrypoint-initdb.d/04-sync.sql:ro
+      - ../sql/quartz.sql:/docker-entrypoint-initdb.d/05-scheduler.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -p$${MYSQL_ROOT_PASSWORD} --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api-gateway:
+    <<: *service
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    command: ["node", "dist/apps/api-gateway/main.js"]
+    environment:
+      <<: *service-env
+      AUTH_SERVICE_URL: http://auth-service:9200
+      IDENTITY_SERVICE_URL: http://identity-service:9201
+      PLATFORM_SERVICE_URL: http://platform-service:9204
+      PROCUREMENT_SERVICE_URL: http://procurement-service:9205
+      COLLABORATION_SERVICE_URL: http://collaboration-service:9206
+      SYNC_SERVICE_URL: http://sync-service:9207
+      GENERATOR_SERVICE_URL: http://codegen-service:9202
+      SCHEDULER_SERVICE_URL: http://scheduler-service:9203
+      FILE_SERVICE_URL: http://file-service:9300
+    ports:
+      - "8080:8080"
+    depends_on:
+      auth-service: { condition: service_started }
+      identity-service: { condition: service_started }
+      platform-service: { condition: service_started }
+      procurement-service: { condition: service_started }
+      collaboration-service: { condition: service_started }
+      sync-service: { condition: service_started }
+      redis: { condition: service_healthy }
+
+  auth-service:
+    <<: *service
+    command: ["node", "dist/apps/auth-service/main.js"]
+    expose: ["9200"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  identity-service:
+    <<: *service
+    command: ["node", "dist/apps/identity-service/main.js"]
+    environment:
+      <<: *service-env
+      FILE_PUBLIC_URL: ${FILE_PUBLIC_URL:-http://localhost:8080/file/statics}
+      UPLOAD_DIR: /app/uploads
+    expose: ["9201"]
+    volumes: ["uploads:/app/uploads"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  platform-service:
+    <<: *service
+    command: ["node", "dist/apps/platform-service/main.js"]
+    expose: ["9204"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  procurement-service:
+    <<: *service
+    command: ["node", "dist/apps/procurement-service/main.js"]
+    expose: ["9205"]
+    depends_on:
+      mysql: { condition: service_healthy }
+
+  collaboration-service:
+    <<: *service
+    command: ["node", "dist/apps/collaboration-service/main.js"]
+    expose: ["9206"]
+    depends_on:
+      mysql: { condition: service_healthy }
+
+  sync-service:
+    <<: *service
+    command: ["node", "dist/apps/sync-service/main.js"]
+    expose: ["9207"]
+    depends_on:
+      mysql: { condition: service_healthy }
+
+  codegen-service:
+    <<: *service
+    command: ["node", "dist/apps/codegen-service/main.js"]
+    expose: ["9202"]
+    depends_on:
+      mysql: { condition: service_healthy }
+
+  scheduler-service:
+    <<: *service
+    command: ["node", "dist/apps/scheduler-service/main.js"]
+    expose: ["9203"]
+    depends_on:
+      mysql: { condition: service_healthy }
+
+  file-service:
+    <<: *service
+    command: ["node", "dist/apps/file-service/main.js"]
+    environment:
+      <<: *service-env
+      UPLOAD_DIR: /app/uploads
+      FILE_PUBLIC_URL: ${FILE_PUBLIC_URL:-http://localhost:8080/file/statics}
+    expose: ["9300"]
+    volumes: ["uploads:/app/uploads"]
+
+  monitor-service:
+    <<: *service
+    command: ["node", "dist/apps/monitor-service/main.js"]
+    expose: ["9100"]
+    depends_on:
+      mysql: { condition: service_healthy }
+
+  web:
+    image: yanglao-web-admin:1.0.0
+    build:
+      context: ..
+      dockerfile: web-admin/Dockerfile
+    restart: unless-stopped
+    ports: ["80:80"]
+    depends_on:
+      api-gateway: { condition: service_started }
+
+volumes:
+  mysql-data:
+  redis-data:
+  uploads:
